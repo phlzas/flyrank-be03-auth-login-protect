@@ -9,6 +9,10 @@ for password hashing and **JWT bearer** tokens for the protected routes.
 > **Stage 7 bonus artifact** — an AI-generated draft kept in quarantine for the
 > "AI vs me" review. It is not part of the submission and never runs as part of it.
 
+This repo also carries **Week 7 / A17 — "Put an LLM behind your API"**: a `POST /triage`
+endpoint that turns a messy support message into clean, validated JSON using an LLM
+behind a swappable provider interface. Jump to **[LLM triage endpoint](#llm-triage-endpoint-w7--a17)**.
+
 ---
 
 ## Features
@@ -22,6 +26,7 @@ for password hashing and **JWT bearer** tokens for the protected routes.
 | Roles | An `admin` role gates a route that returns **403** for non-admins |
 | Rate limiting | Fixed-window limiter on `/auth/login` returns **429** when hammered |
 | Errors | Every 4xx/5xx returns the same shape: `{ "error": "..." }` |
+| **LLM triage** | `POST /triage` classifies a support message via an LLM (A17) with timeout, retries, cost log and a kill switch |
 | Docs | Interactive Swagger UI at **`/docs`** |
 
 ---
@@ -53,6 +58,11 @@ dotnet build FlyRank.Auth.sln
 |---|---|
 | `JWT_SECRET` | HMAC signing key for access tokens (required) |
 | `ADMIN_EMAILS` | Comma-separated emails that receive the `admin` role (optional; defaults to `admin@example.com`) |
+| `LLM_BASE_URL` | OpenAI-compatible base URL (A17) |
+| `LLM_API_KEY` | Provider key (A17) |
+| `LLM_MODEL` | Model id (A17) |
+| `LLM_ENABLED` / `LLM_STUB` | Kill switch / stub mode (A17) |
+| `LLM_TIMEOUT_SECONDS` / `LLM_MAX_RETRIES` / `LLM_TEMPERATURE` / `LLM_JSON_MODE` | Behaviour knobs (A17) |
 
 The database (`src/FlyRank.Auth.Api/flyrank_auth.db`, SQLite) is created and migrated
 automatically on first run.
@@ -89,6 +99,7 @@ prefix), and the protected endpoints become callable from the browser.
 | `GET` | `/protected/profile` | bearer | `200` `{ id, email, fullName, createdAt, tokenId, issuedAt, expiresAt }` | `401` `{ "error": "..." }` |
 | `GET` | `/protected/dashboard` | bearer | `200` `{ message, userId }` | `401` `{ "error": "..." }` |
 | `GET` | `/protected/admin` | bearer + `admin` role | `200` `{ message, userId }` | `401` if no/invalid token, **`403`** if not admin |
+| `POST` | `/triage` | none | `200` `{ category, urgency, suggested_team, confidence, reason }` | `400` bad input (names `text`), `422` model answer failed validation, `502` provider failed, `503` disabled/not configured, `504` timeout |
 
 ### Error responses
 
@@ -124,6 +135,134 @@ curl http://localhost:3000/protected/profile -H "Authorization: Bearer <access_t
 # Log out (revokes the token)
 curl -X POST http://localhost:3000/auth/logout -H "Authorization: Bearer <access_token>"
 ```
+
+---
+
+## LLM triage endpoint (W7 / A17)
+
+### What it does
+
+One support message in, one classification out. No chat, no memory.
+
+```bash
+curl -X POST http://localhost:3000/triage \
+  -H "Content-Type: application/json" \
+  -d '{"text":"I was charged twice for my subscription, please refund the extra one."}'
+```
+
+```json
+{"category":"billing","urgency":"high","suggested_team":"billing","confidence":0.95,"reason":"The customer is reporting a duplicate charge and requesting a refund."}
+```
+
+**The job card** is in [`JOB-CARD.md`](JOB-CARD.md). A model is the right tool because
+the input is fuzzy free text (any phrasing, any language) and the output is a small
+closed set of answers a rule downstream can act on — the opposite of arithmetic or an
+exact lookup.
+
+| Field | Allowed values |
+|---|---|
+| `category` | `billing` · `bug` · `feature` · `other` |
+| `urgency` | `low` · `normal` · `high` |
+| `suggested_team` | `billing` · `engineering` · `product` · `success` · `triage` |
+| `confidence` | number `0.0`–`1.0` |
+| `reason` | one sentence, ≤ 300 chars |
+
+When a message genuinely doesn't fit, the model is told to return `other` / `triage`
+with confidence `< 0.5` rather than guess.
+
+### Swapping providers
+
+The provider is chosen by base URL, so **only these three values change** to move
+between LM Studio, Ollama, OpenRouter, OpenAI, etc.:
+
+| Key | Value used here |
+|---|---|
+| `LLM_BASE_URL` | `http://localhost:1234/v1` (LM Studio) |
+| `LLM_API_KEY` | the provider key |
+| `LLM_MODEL` | `gemma-4-e2b-it-qat` |
+
+The endpoint is built on a plain `HttpClient`, **not** the vendor SDK, so the timeout,
+retries and logging are ours to control. The client speaks the OpenAI-compatible
+`/chat/completions` shape.
+
+### What happens on every request
+
+1. **Validate the request** *before* any model call → `400 { error, field }` naming
+   `text` (missing, wrong type, empty, or over 2000 chars).
+2. **Call the model** through `ILlmClient` with a **real per-attempt timeout**
+   (`LLM_TIMEOUT_SECONDS`, default 30s — never an SDK ten-minute default).
+3. **Retry** only transient failures (timeout / `429` / `5xx` / network) with
+   exponential backoff **+ jitter**, honouring `Retry-After`. A `400/401/403` is never
+   retried.
+4. **Parse → validate** the answer against the closed schema.
+5. **Repair once** — if invalid, re-ask with the exact validation error. Success sets
+   header `X-Triage-Repaired: true`.
+6. **Quarantine** answers still invalid after the repair → `422` and a line in
+   `logs/quarantine.jsonl`. The raw model text is **never** returned to the caller.
+7. **Cost log** one structured line per attempt to `logs/llm-cost.jsonl` (prompt
+   version, model, attempt, outcome, status, input/output tokens, duration, retried).
+
+### Operational switches
+
+| Key | Default | Effect |
+|---|---|---|
+| `LLM_ENABLED` | `true` | **Kill switch.** `false` → deterministic fallback answer, no model call |
+| `LLM_STUB` | `false` | `true` → returns a fixed valid answer, no model call (wiring test) |
+| `LLM_TIMEOUT_SECONDS` | `30` | Per-attempt timeout (clamped 1–60) |
+| `LLM_MAX_RETRIES` | `3` | Extra attempts on transient failures (clamped 0–5) |
+| `LLM_TEMPERATURE` | `0` | Deterministic by default |
+| `LLM_JSON_MODE` | `false` | Ask the provider for a JSON response format, when supported |
+
+### Prompt as a versioned file
+
+The system prompt lives in [`prompts/triage-v2.md`](prompts/triage-v2.md), not in a
+route handler. The prompt **version** (`triage-v2`) is written into every cost and
+quarantine log line, so a bad answer can always be traced back to the prompt that
+produced it.
+
+### Evaluation
+
+`evals/cases.json` holds **8 labelled cases**, including one genuinely ambiguous message
+and one that should be answered "I'm not sure". Scored by `scripts/eval.ps1`:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts/eval.ps1
+```
+
+**Current result: 8 / 8.**
+
+The score is real and it moved. With **prompt v1** the eval was **7/8**: the miss was
+*"Thanks, I just wanted to say the new onboarding flow is really lovely."* — v1 only
+defined `other` as "when unsure", so the model read praise as a **feature** request.
+v2 defines all four categories explicitly ("praise and nice words are **not** feature
+requests") and adds a praise example; that case now passes and the rest stayed green.
+This is the whole point of keeping the prompt in a versioned file and keeping an eval.
+
+### Proving the failure paths (no model needed)
+
+`scripts/mock-bad-provider.ps1` stands in for a broken provider so the unhappy paths are
+reproducible:
+
+```powershell
+# provider returns invalid triage JSON -> /triage answers 422 + writes logs/quarantine.jsonl
+powershell.exe -File scripts/mock-bad-provider.ps1 -Port 3999 -Status 200
+# provider rejects our key -> /triage answers 502 (client error, not retried)
+powershell.exe -File scripts/mock-bad-provider.ps1 -Port 3999 -Status 401
+```
+
+### Verified checkpoints
+
+| Checkpoint | Result |
+|---|---|
+| `scripts/hello.ps1` (Stage 0 one-shot call) | `ready`, ~2.6s |
+| Bad input (`{}`, wrong type, empty, >2000) | `400`, every body names `field":"text"` |
+| Real call (billing / bug / feature) | `200`, exactly the 5 schema fields |
+| Provider returns invalid JSON | `422` + one `logs/quarantine.jsonl` line (`triage-v2`) |
+| `LLM_ENABLED=false` | `200` fallback, confidence `0` |
+| `LLM_STUB=true` | `200` fixed answer, no model call |
+| Provider key rejected (`401`) | `502` |
+| Provider unreachable (dead port) | `502` after retries |
+| `scripts/eval.ps1` | **8 / 8** |
 
 ---
 
@@ -195,20 +334,45 @@ This blunts password-brute-forcing while leaving the other routes untouched.
 flyrank-be03-auth-login-protect/
 ├─ FlyRank.Auth.sln
 ├─ README.md
+├─ JOB-CARD.md                  # A17: one sentence, input/output, three rules
 ├─ .env.example
 ├─ docs/
 │  └─ swagger-ui.png
+├─ prompts/
+│  ├─ triage-v1.md              # prompt v1 (eval: 7/8)
+│  └─ triage-v2.md              # prompt v2 (eval: 8/8) - active
+├─ evals/
+│  ├─ cases.json                # 8 labelled cases (1 ambiguous, 1 when-unsure)
+│  └─ last-run.json             # written by scripts/eval.ps1
 ├─ scripts/
-│  └─ smoke-test.ps1            # 14 end-to-end assertions
+│  ├─ smoke-test.ps1            # 14 auth end-to-end assertions
+│  ├─ hello.ps1                 # A17 Stage 0: one provider call
+│  ├─ eval.ps1                  # A17 Stage 5: score the endpoint
+│  └─ mock-bad-provider.ps1     # A17: simulate a broken provider (422 / 401)
 ├─ src/FlyRank.Auth.Api/
-│  ├─ Program.cs                # wiring: JWT, errors, rate limit, admin policy
+│  ├─ Program.cs                # wiring: JWT, errors, rate limit, LLM services
 │  ├─ Dtos/AuthDtos.cs
 │  ├─ Models/AppUser.cs
 │  ├─ Services/JwtTokenService.cs
 │  ├─ Middleware/RevokedTokenMiddleware.cs
-│  ├─ Controllers/{Public,Auth,Protected}Controller.cs
+│  ├─ Llm/
+│  │  ├─ LlmOptions.cs          # env-driven config (kill switch, retries, timeout)
+│  │  ├─ LlmContracts.cs        # ILlmClient + call result / cost record
+│  │  ├─ OpenAiCompatibleLlmClient.cs  # timeout, retries, backoff, cost log
+│  │  ├─ LlmCostLogger.cs       # logs/llm-cost.jsonl
+│  │  ├─ PromptLoader.cs        # loads prompts/triage-v2.md + version
+│  │  └─ RepoPaths.cs
+│  ├─ Triage/
+│  │  ├─ TriageSchema.cs        # the closed lists and limits
+│  │  ├─ TriageResult.cs
+│  │  ├─ TriageInputValidator.cs
+│  │  ├─ TriageOutputParser.cs  # fence-strip, parse, closed-schema validation
+│  │  ├─ QuarantineLogger.cs    # logs/quarantine.jsonl
+│  │  └─ TriageService.cs       # validate -> call -> repair -> quarantine/422
+│  ├─ Controllers/{Public,Auth,Protected,Triage}Controller.cs
 │  └─ Migrations/
 └─ ai-version/                  # Stage 7 bonus artifact (NOT the submission)
+```
    ├─ server.js                 # AI first draft (has defects)
    ├─ rematch/server.js         # regenerated after the improved prompt
    ├─ PROMPT.md                 # original + improved prompt
