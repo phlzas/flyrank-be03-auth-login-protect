@@ -1,0 +1,70 @@
+{
+    "ran_at":  "2026-10-13T14:16:26.5685944Z",
+    "score":  "8/8",
+    "results":  [
+                    {
+                        "id":  "billing-duplicate-charge",
+                        "expected":  "billing",
+                        "got":  "billing",
+                        "status":  200,
+                        "repaired":  "false",
+                        "pass":  true
+                    },
+                    {
+                        "id":  "bug-export-button",
+                        "expected":  "bug",
+                        "got":  "bug",
+                        "status":  200,
+                        "repaired":  "false",
+                        "pass":  true
+                    },
+                    {
+                        "id":  "feature-dark-mode",
+                        "expected":  "feature",
+                        "got":  "feature",
+                        "status":  200,
+                        "repaired":  "false",
+                        "pass":  true
+                    },
+                    {
+                        "id":  "billing-plan-switch",
+                        "expected":  "billing",
+                        "got":  "billing",
+                        "status":  200,
+                        "repaired":  "false",
+                        "pass":  true
+                    },
+                    {
+                        "id":  "bug-google-login-500",
+                        "expected":  "bug",
+                        "got":  "bug",
+                        "status":  200,
+                        "repaired":  "false",
+                        "pass":  true
+                    },
+                    {
+                        "id":  "other-praise",
+                        "expected":  "other",
+                        "got":  "other",
+                        "status":  200,
+                        "repaired":  "false",
+                        "pass":  true
+                    },
+                    {
+                        "id":  "ambiguous-overcharge-and-lockout",
+                        "expected":  "billing",
+                        "got":  "billing",
+                        "status":  200,
+                        "repaired":  "false",
+                        "pass":  true
+                    },
+                    {
+                        "id":  "when-unsure-gibberish",
+                        "expected":  "other",
+                        "got":  "other",
+                        "status":  200,
+                        "repaired":  "false",
+                        "pass":  true
+                    }
+                ]
+}

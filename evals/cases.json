@@ -1,0 +1,50 @@
+[
+  {
+    "id": "billing-duplicate-charge",
+    "text": "I was charged twice for my subscription this month, please refund the extra one.",
+    "expected_category": "billing",
+    "note": "Clear billing case (also a prompt example - sanity check)."
+  },
+  {
+    "id": "bug-export-button",
+    "text": "The export button does nothing when I click it, nothing downloads.",
+    "expected_category": "bug",
+    "note": "Clear bug (also a prompt example - sanity check)."
+  },
+  {
+    "id": "feature-dark-mode",
+    "text": "It would be great if you could add a dark mode to the mobile app.",
+    "expected_category": "feature",
+    "note": "Clear feature request."
+  },
+  {
+    "id": "billing-plan-switch",
+    "text": "Can I switch from monthly to annual billing? And where do I update my card details?",
+    "expected_category": "billing",
+    "note": "Clear billing question (plan + payment method)."
+  },
+  {
+    "id": "bug-google-login-500",
+    "text": "Sign-in with Google fails with a 500 error since I reset my password yesterday.",
+    "expected_category": "bug",
+    "note": "Clear bug (broken auth flow)."
+  },
+  {
+    "id": "other-praise",
+    "text": "Thanks, I just wanted to say the new onboarding flow is really lovely.",
+    "expected_category": "other",
+    "note": "Genuine but not a request - should not be forced into bug/feature."
+  },
+  {
+    "id": "ambiguous-overcharge-and-lockout",
+    "text": "I think I was overcharged last month and now I can't get in to check my invoice.",
+    "expected_category": "billing",
+    "note": "AMBIGUOUS: the message spans billing and an access/bug problem. There is no single obviously-correct answer; billing is the most defensible because the overcharge is the concrete, actionable claim. A reasonable model could also answer 'bug' - this case exists to show ambiguity is real, not to punish the model."
+  },
+  {
+    "id": "when-unsure-gibberish",
+    "text": "asdf qwerty zxcv 123 do the thing",
+    "expected_category": "other",
+    "note": "WHEN-UNSURE: not a real message. The prompt says use category 'other', team 'triage', confidence < 0.5 - the model must not guess."
+  }
+]
