@@ -24,4 +24,7 @@ Thumbs.db
 
 # ---- Local run artifacts ----
 *.log
-server.pid
+*.pid
+
+# ---- LLM runtime logs (cost + quarantine) ----
+logs/
