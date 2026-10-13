@@ -2,10 +2,12 @@ using System.Security.Claims;
 using System.Text;
 using System.Threading.RateLimiting;
 using FlyRank.Auth.Api.Data;
+using FlyRank.Auth.Api.Llm;
 using FlyRank.Auth.Api.Middleware;
 using FlyRank.Auth.Api.Models;
 using FlyRank.Auth.Api.Options;
 using FlyRank.Auth.Api.Services;
+using FlyRank.Auth.Api.Triage;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
@@ -141,6 +143,22 @@ builder.Services.AddRateLimiter(options =>
 });
 
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
+
+// ---- LLM (A17 - "Put an LLM behind your API") --------------------------------------
+var llmOptions = LlmOptions.FromEnvironment();
+builder.Services.AddSingleton(llmOptions);
+builder.Services.AddSingleton<PromptLoader>();
+builder.Services.AddSingleton<ILlmCostLogger, LlmCostLogger>();
+builder.Services.AddSingleton<QuarantineLogger>();
+builder.Services.AddSingleton<TriageInputValidator>();
+builder.Services.AddSingleton<TriageOutputParser>();
+builder.Services.AddScoped<TriageService>();
+builder.Services.AddHttpClient<ILlmClient, OpenAiCompatibleLlmClient>(client =>
+{
+    // The real timeout is enforced per attempt inside the client, not by HttpClient.
+    client.Timeout = Timeout.InfiniteTimeSpan;
+});
+
 builder.Services.AddControllers();
 
 // Override the [ApiController] default so automatic model-validation 400s also use
