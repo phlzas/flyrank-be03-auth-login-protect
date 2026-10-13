@@ -1,7 +1,9 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using FlyRank.Auth.Api.Dtos;
+using FlyRank.Auth.Api.Models;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FlyRank.Auth.Api.Controllers;
@@ -16,27 +18,32 @@ namespace FlyRank.Auth.Api.Controllers;
 [Authorize]
 public class ProtectedController : ControllerBase
 {
+    private readonly UserManager<AppUser> _userManager;
+
+    public ProtectedController(UserManager<AppUser> userManager)
+    {
+        _userManager = userManager;
+    }
+
     /// <summary>Returns profile information for the authenticated user.</summary>
     /// <response code="200">Authenticated; returns the caller's profile.</response>
     /// <response code="401">Missing, invalid, expired or revoked token.</response>
     [HttpGet("profile")]
     [ProducesResponseType(typeof(ProfileResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public ActionResult<ProfileResponse> Profile()
+    public async Task<ActionResult<ProfileResponse>> Profile()
     {
-        var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                     ?? User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value
-                     ?? string.Empty;
-        var email = User.FindFirst("email")?.Value
-                    ?? User.FindFirst(ClaimTypes.Email)?.Value
-                    ?? string.Empty;
-        var fullName = User.FindFirst("full_name")?.Value;
-        var jti = User.FindFirst(JwtRegisteredClaimNames.Jti)?.Value ?? string.Empty;
+        var userId = CurrentUserId();
+        var user = await _userManager.FindByIdAsync(userId);
 
-        var issuedAt = ReadUnixTime("iat");
-        var expiresAt = ReadUnixTime("exp");
-
-        return Ok(new ProfileResponse(userId, email, fullName, jti, issuedAt, expiresAt));
+        return Ok(new ProfileResponse(
+            Id: userId,
+            Email: user?.Email ?? CurrentEmail(),
+            FullName: user?.FullName,
+            CreatedAt: user?.CreatedAt ?? DateTimeOffset.UtcNow,
+            TokenId: User.FindFirst(JwtRegisteredClaimNames.Jti)?.Value ?? string.Empty,
+            IssuedAt: ReadUnixTime("iat"),
+            ExpiresAt: ReadUnixTime("exp")));
     }
 
     /// <summary>Example second protected route used to prove the middleware is reusable.</summary>
@@ -47,15 +54,38 @@ public class ProtectedController : ControllerBase
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public ActionResult<DashboardResponse> Dashboard()
     {
-        var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                     ?? User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value
-                     ?? string.Empty;
-
         return Ok(new DashboardResponse(
             Message: "This is a protected dashboard. Only authenticated users can see it.",
-            UserId: userId,
+            UserId: CurrentUserId(),
             ServerTime: DateTimeOffset.UtcNow));
     }
+
+    /// <summary>Admin-only route: authenticated users without the admin role get 403.</summary>
+    /// <response code="200">Caller is an admin.</response>
+    /// <response code="401">Missing, invalid, expired or revoked token.</response>
+    /// <response code="403">Authenticated but not an admin.</response>
+    [HttpGet("admin")]
+    [Authorize(Policy = "AdminOnly")]
+    [ProducesResponseType(typeof(AdminResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public ActionResult<AdminResponse> Admin()
+    {
+        return Ok(new AdminResponse(
+            Message: "Welcome, admin. This area is restricted.",
+            UserId: CurrentUserId(),
+            Role: "admin"));
+    }
+
+    private string CurrentUserId() =>
+        User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        ?? User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value
+        ?? string.Empty;
+
+    private string CurrentEmail() =>
+        User.FindFirst("email")?.Value
+        ?? User.FindFirst(ClaimTypes.Email)?.Value
+        ?? string.Empty;
 
     private DateTimeOffset ReadUnixTime(string claimType)
     {

@@ -10,4 +10,7 @@ public class AppUser : IdentityUser
 {
     /// <summary>Optional display name supplied at sign-up.</summary>
     public string? FullName { get; set; }
+
+    /// <summary>When the account was created (returned by the profile endpoint).</summary>
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

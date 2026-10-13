@@ -43,6 +43,10 @@ public sealed class JwtTokenService : IJwtTokenService
             claims.Add(new Claim("full_name", user.FullName!));
         }
 
+        // Authorization role: "admin" only for emails listed in ADMIN_EMAILS.
+        // Everyone else is a plain "user". Drives the 403 demo route.
+        claims.Add(new Claim("role", IsAdmin(user.Email) ? "admin" : "user"));
+
         var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.Secret));
         var credentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
 
@@ -61,5 +65,18 @@ public sealed class JwtTokenService : IJwtTokenService
     {
         var bytes = RandomNumberGenerator.GetBytes(48);
         return Base64UrlEncoder.Encode(bytes);
+    }
+
+    private static bool IsAdmin(string? email)
+    {
+        if (string.IsNullOrWhiteSpace(email))
+        {
+            return false;
+        }
+
+        var allowlist = Environment.GetEnvironmentVariable("ADMIN_EMAILS") ?? string.Empty;
+        return allowlist
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(a => string.Equals(a, email, StringComparison.OrdinalIgnoreCase));
     }
 }

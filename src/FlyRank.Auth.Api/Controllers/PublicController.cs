@@ -19,11 +19,6 @@ public class PublicController : ControllerBase
     [ProducesResponseType(typeof(PublicInfoResponse), StatusCodes.Status200OK)]
     public ActionResult<PublicInfoResponse> Info()
     {
-        return Ok(new PublicInfoResponse(
-            Message: "Welcome stranger! This endpoint is public.",
-            Service: "FlyRank BE-03 Auth API",
-            Version: "1.0.0",
-            ServerTime: DateTimeOffset.UtcNow,
-            AuthenticationRequired: false));
+        return Ok(new PublicInfoResponse(Message: "Welcome stranger! This info is public."));
     }
 }

@@ -1,6 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
 using FlyRank.Auth.Api.Data;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
 namespace FlyRank.Auth.Api.Middleware;
@@ -27,12 +26,9 @@ public sealed class RevokedTokenMiddleware
                 await db.RevokedAccessTokens.AnyAsync(t => t.Jti == jti))
             {
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                await context.Response.WriteAsJsonAsync(new ProblemDetails
-                {
-                    Title = "Unauthorized",
-                    Status = StatusCodes.Status401Unauthorized,
-                    Detail = "This token has been revoked. Please log in again.",
-                });
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsJsonAsync(
+                    new { error = "This token has been revoked. Please log in again." });
                 return;
             }
         }

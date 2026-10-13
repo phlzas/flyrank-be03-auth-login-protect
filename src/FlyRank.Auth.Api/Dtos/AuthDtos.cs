@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 
 namespace FlyRank.Auth.Api.Dtos;
 
@@ -37,19 +38,23 @@ public sealed record RefreshRequest
 /// <summary>Public projection of a user.</summary>
 public sealed record UserDto(string Id, string Email, string? FullName);
 
-/// <summary>Returned by sign-up, login and refresh.</summary>
+/// <summary>
+/// Returned by sign-up, login and refresh. Token fields use snake_case
+/// (<c>access_token</c>, <c>refresh_token</c>) to match the specification.
+/// </summary>
 public sealed record AuthResponse(
-    string AccessToken,
-    string RefreshToken,
-    string TokenType,
-    int ExpiresIn,
-    UserDto User);
+    [property: JsonPropertyName("access_token")] string AccessToken,
+    [property: JsonPropertyName("refresh_token")] string RefreshToken,
+    [property: JsonPropertyName("token_type")] string TokenType,
+    [property: JsonPropertyName("expires_in")] int ExpiresIn,
+    [property: JsonPropertyName("user")] UserDto User);
 
-/// <summary>Returned by <c>GET /protected/profile</c>.</summary>
+/// <summary>Returned by <c>GET /protected/profile</c> (id, email and account-created date).</summary>
 public sealed record ProfileResponse(
     string Id,
     string Email,
     string? FullName,
+    DateTimeOffset CreatedAt,
     string TokenId,
     DateTimeOffset IssuedAt,
     DateTimeOffset ExpiresAt);
@@ -60,10 +65,14 @@ public sealed record DashboardResponse(
     string UserId,
     DateTimeOffset ServerTime);
 
-/// <summary>Returned by <c>GET /public/info</c>.</summary>
-public sealed record PublicInfoResponse(
+/// <summary>Returned by <c>GET /protected/admin</c>.</summary>
+public sealed record AdminResponse(
     string Message,
-    string Service,
-    string Version,
-    DateTimeOffset ServerTime,
-    bool AuthenticationRequired);
+    string UserId,
+    string Role);
+
+/// <summary>Returned by <c>GET /public/info</c>.</summary>
+public sealed record PublicInfoResponse(string Message);
+
+/// <summary>Uniform error body: <c>{ "error": "..." }</c> for every 4xx response.</summary>
+public sealed record ErrorResponse(string Error);

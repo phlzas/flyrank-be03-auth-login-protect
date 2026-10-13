@@ -7,13 +7,14 @@ using FlyRank.Auth.Api.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 namespace FlyRank.Auth.Api.Controllers;
 
 /// <summary>
 /// Authentication endpoints: sign-up, login, logout and token refresh.
-/// All responses use explicit HTTP status codes (201/200/204/400/401).
+/// All errors use the shape <c>{ "error": "..." }</c> with explicit status codes.
 /// </summary>
 [ApiController]
 [Route("auth")]
@@ -24,20 +25,17 @@ public class AuthController : ControllerBase
     private readonly IJwtTokenService _tokens;
     private readonly ApplicationDbContext _db;
     private readonly JwtOptions _jwtOptions;
-    private readonly ILogger<AuthController> _logger;
 
     public AuthController(
         UserManager<AppUser> userManager,
         IJwtTokenService tokens,
         ApplicationDbContext db,
-        JwtOptions jwtOptions,
-        ILogger<AuthController> logger)
+        JwtOptions jwtOptions)
     {
         _userManager = userManager;
         _tokens = tokens;
         _db = db;
         _jwtOptions = jwtOptions;
-        _logger = logger;
     }
 
     /// <summary>Registers a new user with email + password.</summary>
@@ -49,64 +47,46 @@ public class AuthController : ControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<IActionResult> SignUp([FromBody] SignUpRequest request)
     {
-        if (!ModelState.IsValid)
-        {
-            return ValidationProblem(ModelState);
-        }
-
         var user = new AppUser
         {
             UserName = request.Email,
             Email = request.Email,
             FullName = request.FullName,
+            CreatedAt = DateTimeOffset.UtcNow,
         };
 
         // Identity hashes the password with PBKDF2 and enforces the configured policy.
         var result = await _userManager.CreateAsync(user, request.Password);
         if (!result.Succeeded)
         {
-            foreach (var error in result.Errors)
-            {
-                ModelState.AddModelError(error.Code, error.Description);
-            }
-
-            return ValidationProblem(ModelState);
+            var message = string.Join("; ", result.Errors.Select(e => e.Description));
+            return BadRequest(new { error = message });
         }
 
-        _logger.LogInformation("New user registered: {UserId}", user.Id);
-
-        var dto = new UserDto(user.Id, user.Email!, user.FullName);
-        return Created($"/auth/users/{user.Id}", dto);
+        return Created($"/auth/users/{user.Id}", new UserDto(user.Id, user.Email!, user.FullName));
     }
 
     /// <summary>Authenticates a user and returns an access token + refresh token.</summary>
     /// <response code="200">Authenticated.</response>
     /// <response code="400">Missing or invalid input.</response>
     /// <response code="401">Invalid email or password.</response>
+    /// <response code="429">Too many login attempts.</response>
     [HttpPost("login")]
     [AllowAnonymous]
+    [EnableRateLimiting("login")]
     [ProducesResponseType(typeof(AuthResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status429TooManyRequests)]
     public async Task<IActionResult> Login([FromBody] LoginRequest request)
     {
-        if (!ModelState.IsValid)
-        {
-            return ValidationProblem(ModelState);
-        }
-
         var user = await _userManager.FindByEmailAsync(request.Email);
 
         // Same generic response whether the user is unknown or the password is wrong,
         // so we never leak which emails are registered.
         if (user is null || !await _userManager.CheckPasswordAsync(user, request.Password))
         {
-            return Unauthorized(new ProblemDetails
-            {
-                Title = "Unauthorized",
-                Status = StatusCodes.Status401Unauthorized,
-                Detail = "Invalid email or password.",
-            });
+            return Unauthorized(new { error = "Invalid login credentials" });
         }
 
         var accessToken = _tokens.CreateAccessToken(user, out _, out var expiresAt);
@@ -122,14 +102,7 @@ public class AuthController : ControllerBase
         });
         await _db.SaveChangesAsync();
 
-        var response = new AuthResponse(
-            accessToken,
-            refreshToken,
-            "Bearer",
-            (int)Math.Max(0, (expiresAt - DateTimeOffset.UtcNow).TotalSeconds),
-            new UserDto(user.Id, user.Email!, user.FullName));
-
-        return Ok(response);
+        return Ok(BuildAuthResponse(user, accessToken, refreshToken, expiresAt));
     }
 
     /// <summary>Logs out the caller by revoking the current access token and refresh token.</summary>
@@ -154,8 +127,6 @@ public class AuthController : ControllerBase
                 {
                     Jti = jti,
                     RevokedAt = DateTimeOffset.UtcNow,
-                    // Upper bound: issued-at + access lifetime. Safe because the token
-                    // cannot outlive this window anyway.
                     ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(_jwtOptions.AccessTokenMinutes),
                 });
             }
@@ -187,23 +158,13 @@ public class AuthController : ControllerBase
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> Refresh([FromBody] RefreshRequest request)
     {
-        if (!ModelState.IsValid)
-        {
-            return ValidationProblem(ModelState);
-        }
-
         var stored = await _db.RefreshTokens
             .Include(t => t.User)
             .FirstOrDefaultAsync(t => t.Token == request.RefreshToken);
 
         if (stored is null || stored.IsRevoked || stored.ExpiresAt <= DateTimeOffset.UtcNow || stored.User is null)
         {
-            return Unauthorized(new ProblemDetails
-            {
-                Title = "Unauthorized",
-                Status = StatusCodes.Status401Unauthorized,
-                Detail = "Refresh token is invalid, expired or revoked.",
-            });
+            return Unauthorized(new { error = "Refresh token is invalid, expired or revoked" });
         }
 
         // Rotate: retire the old refresh token, issue a brand new pair.
@@ -223,13 +184,20 @@ public class AuthController : ControllerBase
         });
         await _db.SaveChangesAsync();
 
-        var response = new AuthResponse(
+        return Ok(BuildAuthResponse(user, accessToken, newRefresh, expiresAt));
+    }
+
+    private static AuthResponse BuildAuthResponse(
+        AppUser user,
+        string accessToken,
+        string refreshToken,
+        DateTimeOffset expiresAt)
+    {
+        return new AuthResponse(
             accessToken,
-            newRefresh,
+            refreshToken,
             "Bearer",
             (int)Math.Max(0, (expiresAt - DateTimeOffset.UtcNow).TotalSeconds),
             new UserDto(user.Id, user.Email!, user.FullName));
-
-        return Ok(response);
     }
 }
