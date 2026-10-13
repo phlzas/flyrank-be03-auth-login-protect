@@ -1,250 +1,294 @@
 # FlyRank BE-03 — Auth: Login & Protect
 
-A secure authentication API built with **ASP.NET Core 9**, **ASP.NET Core Identity**
-and **JWT bearer tokens**. It implements sign-up, login, logout and JWT-protected
-routes, and ships an interactive **Swagger UI** at `/docs`.
+A secured authentication API with sign-up, login, logout and JWT-protected routes,
+plus a public route, built on **ASP.NET Core (.NET 9)** with **ASP.NET Core Identity**
+for password hashing and **JWT bearer** tokens for the protected routes.
 
-> **Note on stack choice.** The assignment lists *JavaScript* and *Python* as example
-> lanes and its own Q&A states *"you are welcome to use any resources at your disposal,
-> it doesn't strictly have to be Next.js."* This submission implements the **.NET
-> lane** instead of Supabase Auth, using ASP.NET Core Identity for credential storage
-> (PBKDF2 password hashing) and the framework's JWT bearer handler for token
-> issue/verification. The behaviour, routes and status codes match the specification
-> exactly. We do **not** hand-roll any cryptography — hashing, signing and token
-> validation are all delegated to Microsoft-maintained libraries.
+> **Stack note:** the built API (`src/FlyRank.Auth.Api`) is **.NET only** and uses
+> **no external auth provider** (no Supabase). The `ai-version/` folder is a separate
+> **Stage 7 bonus artifact** — an AI-generated draft kept in quarantine for the
+> "AI vs me" review. It is not part of the submission and never runs as part of it.
 
 ---
 
-## Table of contents
+## Features
 
-- [Overview](#overview)
-- [Requirements](#requirements)
-- [Setup](#setup)
-- [Running the API](#running-the-api)
-- [API reference](#api-reference)
-- [Auth flow](#auth-flow)
-- [Swagger UI](#swagger-ui)
-- [Testing](#testing)
-- [Security notes](#security-notes)
-- [Project structure](#project-structure)
-- [AI vs Me](#ai-vs-me)
-
----
-
-## Overview
-
-| Requirement | Implementation |
+| Area | What it does |
 |---|---|
-| User accounts | ASP.NET Core Identity (`UserManager<AppUser>`) |
-| Password storage | PBKDF2 via Identity (no custom hashing) |
-| Tokens | HS256 JWTs signed with a secret from `.env` |
-| Token verification | `Microsoft.AspNetCore.Authentication.JwtBearer` |
-| Protected routes | `[Authorize]` + reusable revoked-token middleware |
-| Logout | `jti` deny-list + refresh-token revocation |
-| Docs | Swagger UI (Swashbuckle) at `/docs` with Bearer support |
-| Database | SQLite via EF Core Migrations (no external server) |
+| Auth | Sign up, log in, log out |
+| Tokens | JWT access token (HS256) + rotating refresh token |
+| Protection | Reusable bearer-token middleware guarding every protected route |
+| Public route | `GET /public/info` reachable with no token |
+| Roles | An `admin` role gates a route that returns **403** for non-admins |
+| Rate limiting | Fixed-window limiter on `/auth/login` returns **429** when hammered |
+| Errors | Every 4xx/5xx returns the same shape: `{ "error": "..." }` |
+| Docs | Interactive Swagger UI at **`/docs`** |
+
+---
 
 ## Requirements
 
-- [.NET SDK 9.0](https://dotnet.microsoft.com/download) (built and tested on `9.0.317`)
-- No database server, no Docker, no external accounts required.
+- [.NET SDK 9.0+](https://dotnet.microsoft.com/download)
+- EF Core CLI tool (restored automatically from `.config/dotnet-tools.json`)
+
+---
 
 ## Setup
 
-1. **Clone** the repository.
-2. **Create your `.env`** from the template:
+```bash
+# 1. Install the local EF Core tool (pinned in .config/dotnet-tools.json)
+dotnet tool restore
 
-   ```bash
-   cp .env.example .env
-   ```
+# 2. Create your .env from the template and set a secret
+cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
+# then edit JWT_SECRET to a long random string
 
-3. **Set a strong `JWT_SECRET`** (at least 32 characters):
+# 3. Restore + build
+dotnet build FlyRank.Auth.sln
+```
 
-   ```bash
-   # bash
-   openssl rand -hex 32
-   ```
+`.env` values:
 
-   ```powershell
-   # Windows PowerShell
-   -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })
-   ```
+| Key | Purpose |
+|---|---|
+| `JWT_SECRET` | HMAC signing key for access tokens (required) |
+| `ADMIN_EMAILS` | Comma-separated emails that receive the `admin` role (optional; defaults to `admin@example.com`) |
 
-   Paste the result into `.env` as `JWT_SECRET=...`.
+The database (`src/FlyRank.Auth.Api/flyrank_auth.db`, SQLite) is created and migrated
+automatically on first run.
 
-   > The app **refuses to start** if `JWT_SECRET` is missing or shorter than 32
-   > characters, so it can never boot insecurely.
+---
 
-4. **Restore** dependencies:
-
-   ```bash
-   dotnet restore
-   ```
-
-The `.env` file is listed in `.gitignore` and will never be committed.
-
-## Running the API
+## Running
 
 ```bash
 dotnet run --project src/FlyRank.Auth.Api
 ```
 
-The app applies EF Core migrations on startup (creating `flyrank_auth.db` on first
-run) and listens on **http://localhost:3000** (configurable via `PORT` in `.env`).
+The API listens on **`http://localhost:3000`** and Swagger UI is served at
+**`http://localhost:3000/docs`**.
 
-Then open **http://localhost:3000/docs** for the interactive Swagger UI.
-
-## API reference
-
-| Method | Route | Auth | Success | Errors |
-|---|---|---|---|---|
-| `POST` | `/auth/signup` | No | `201 Created` | `400` missing/invalid fields or duplicate email |
-| `POST` | `/auth/login` | No | `200 OK` (access + refresh token) | `400` missing fields · `401` bad credentials |
-| `POST` | `/auth/logout` | **Yes** | `204 No Content` | `401` missing/invalid/expired/revoked token |
-| `POST` | `/auth/refresh` | No | `200 OK` (rotated token pair) | `400` missing field · `401` invalid/expired/revoked refresh token |
-| `GET` | `/protected/profile` | **Yes** | `200 OK` | `401` missing/invalid/expired/revoked token |
-| `GET` | `/protected/dashboard` | **Yes** | `200 OK` | `401` missing/invalid/expired/revoked token |
-| `GET` | `/public/info` | No | `200 OK` | — |
-
-### Example requests
-
-**Sign up**
-
-```bash
-curl -i -X POST http://localhost:3000/auth/signup \
-  -H "Content-Type: application/json" \
-  -d '{"email":"intern@example.com","password":"Passw0rd!","fullName":"Test Intern"}'
-```
-
-**Log in**
-
-```bash
-curl -i -X POST http://localhost:3000/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"intern@example.com","password":"Passw0rd!"}'
-```
-
-**Call a protected route**
-
-```bash
-curl -i http://localhost:3000/protected/profile \
-  -H "Authorization: Bearer <ACCESS_TOKEN>"
-```
-
-**Log out**
-
-```bash
-curl -i -X POST http://localhost:3000/auth/logout \
-  -H "Authorization: Bearer <ACCESS_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"refreshToken":"<REFRESH_TOKEN>"}'
-```
-
-## Auth flow
-
-1. **Sign up** → a user record is created; the password is hashed by Identity.
-2. **Log in** → credentials are verified, then a short-lived **access token** (JWT)
-   and an opaque **refresh token** are returned.
-3. **Protected routes** → the client sends `Authorization: Bearer <access token>`.
-   The JWT bearer middleware validates signature, issuer, audience and lifetime, and
-   a reusable middleware rejects tokens whose `jti` has been revoked.
-4. **Log out** → the access token's `jti` is deny-listed and the refresh token is
-   revoked, so neither can be reused. The deny-listed access token now yields `401`.
-5. **Refresh** *(optional)* → a valid refresh token is exchanged for a fresh pair
-   (rotation: the old refresh token is retired).
-
-## Swagger UI
-
-The interactive docs live at **`/docs`** and include an **Authorize** button that
-applies the Bearer token to every request.
+### Swagger UI
 
 ![Swagger UI](docs/swagger-ui.png)
 
-## Testing
+Click **Authorize**, paste the raw `access_token` from `/auth/login` (no `Bearer `
+prefix), and the protected endpoints become callable from the browser.
 
-A PowerShell smoke test exercises every required route and asserts the status codes:
+---
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
+## API reference
+
+| Method | Path | Auth | Success | Failure |
+|---|---|---|---|---|
+| `GET` | `/public/info` | none | `200` `{ "message": "Welcome stranger! This info is public." }` | — |
+| `POST` | `/auth/signup` | none | `201` user `{ id, email, fullName, createdAt }` | `400` `{ "error": "..." }` |
+| `POST` | `/auth/login` | none | `200` `{ access_token, refresh_token, token_type, expires_in, user }` | `401` `{ "error": "Invalid login credentials" }`, `429` if rate-limited |
+| `POST` | `/auth/refresh` | refresh token | `200` new token pair | `401` `{ "error": "..." }` |
+| `POST` | `/auth/logout` | bearer | `204` | `401` `{ "error": "..." }` |
+| `GET` | `/protected/profile` | bearer | `200` `{ id, email, fullName, createdAt, tokenId, issuedAt, expiresAt }` | `401` `{ "error": "..." }` |
+| `GET` | `/protected/dashboard` | bearer | `200` `{ message, userId }` | `401` `{ "error": "..." }` |
+| `GET` | `/protected/admin` | bearer + `admin` role | `200` `{ message, userId }` | `401` if no/invalid token, **`403`** if not admin |
+
+### Error responses
+
+Every failure uses one shape, so clients only ever parse a single field:
+
+```json
+{ "error": "human-readable reason" }
 ```
 
-Observed results (all passing):
+This includes automatic model-validation failures (e.g. a missing `password` on
+signup), the JWT `OnChallenge`/`OnForbidden` callbacks, the revoked-token middleware,
+and the rate-limiter rejection — there is no RFC-7807 `application/problem+json`.
 
-| Check | Expected | Observed |
-|---|---|---|
-| `GET /public/info` (no auth) | 200 | ✅ 200 |
-| `POST /auth/signup` (valid) | 201 | ✅ 201 |
-| `POST /auth/signup` (missing password) | 400 | ✅ 400 |
-| `POST /auth/login` (valid) | 200 | ✅ 200 |
-| `POST /auth/login` (wrong password) | 401 | ✅ 401 |
-| `GET /protected/profile` (no token) | 401 | ✅ 401 |
-| `GET /protected/profile` (valid token) | 200 | ✅ 200 |
-| `GET /protected/dashboard` (valid token) | 200 | ✅ 200 |
-| `GET /protected/profile` (invalid token) | 401 | ✅ 401 |
-| `POST /auth/logout` (valid token) | 204 | ✅ 204 |
-| `GET /protected/profile` (after logout) | 401 | ✅ 401 |
-| `GET /docs/index.html` (Swagger UI) | 200 | ✅ 200 |
+### Example requests
+
+```bash
+# Public
+curl http://localhost:3000/public/info
+
+# Sign up
+curl -X POST http://localhost:3000/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@example.com","password":"Passw0rd!","fullName":"Alice"}'
+
+# Log in (capture the access_token)
+curl -X POST http://localhost:3000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@example.com","password":"Passw0rd!"}'
+
+# Call a protected route
+curl http://localhost:3000/protected/profile -H "Authorization: Bearer <access_token>"
+
+# Log out (revokes the token)
+curl -X POST http://localhost:3000/auth/logout -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+## Auth flow
+
+1. **Sign up** — password is hashed by ASP.NET Core Identity (PBKDF2); the user record
+   is stored with a `CreatedAt` timestamp.
+2. **Log in** — credentials are checked; on success the API issues:
+   - a short-lived **access token** (JWT, HS256) carrying `sub`, `jti`, `role`, and expiry;
+   - a longer-lived **refresh token** persisted in the database.
+3. **Protected request** — the reusable JWT middleware validates the token. Missing
+   tokens, malformed tokens, and tampered signatures all return `401`.
+4. **Role check** — an authenticated user whose `role` claim is not `admin` is stopped
+   by the `AdminOnly` authorization policy with `403`.
+5. **Refresh** — `/auth/refresh` rotates the refresh token and mints a new access token.
+6. **Log out** — the token's `jti` is added to a revocation store and its refresh token
+   is invalidated; a later request with the same token returns `401`.
+
+Full flow: **client → credentials → signed JWT → protected route → verified `claims`**.
+
+---
+
+## Testing
+
+An end-to-end smoke test drives the running API and asserts on **status codes *and*
+response bodies**:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
+```
+
+Current result: **14 / 14 checks passed**, covering the exact public message, signup
+and its error shape, login / wrong-password, `401` for missing and tampered tokens,
+`createdAt` on the profile, the `403` admin gate, logout revocation, and the `429`
+rate limit.
+
+---
 
 ## Security notes
 
-- **No custom cryptography.** Password hashing (PBKDF2) and JWT signing/verification
-  are handled by framework libraries.
-- **Secrets stay out of git.** `.env` (and `*.db`) are git-ignored; only
-  `.env.example` is committed.
-- **Fail-fast secret check.** The app throws on startup if `JWT_SECRET` is weak.
-- **Uniform login errors.** Unknown email and wrong password return the same `401`
-  body, preventing user enumeration.
-- **Real revocation.** Logout is meaningful: the `jti` is deny-listed and the refresh
-  token is retired, so a stolen access token stops working immediately.
-- **Refresh-token rotation.** Each refresh retires the old token, limiting replay.
-- **Short access-token lifetime** (15 minutes by default) bounds exposure.
+- **Password hashing:** ASP.NET Core Identity (PBKDF2, per-user salt) — never MD5/plain text.
+- **Token verification:** every protected request runs through JWT validation
+  (`ValidateIssuerSigningKey`, lifetime, etc.); a tampered signature fails.
+- **Strict scheme:** the JWT handler reads the token with an explicit `Bearer `
+  prefix check, so a bare token in the `Authorization` header is rejected.
+- **No token logging:** tokens are never written to logs.
+- **Uniform errors:** all failures collapse to `{ "error": ... }`, avoiding response
+  shape or cache differences that can leak state.
+- **Config:** the signing secret comes from `.env` (`JWT_SECRET`); `.env` is git-ignored.
+
+### 401 vs 403
+
+| Status | Meaning | Trigger here |
+|---|---|---|
+| `401 Unauthorized` | *Who are you?* — no/invalid/expired/revoked token | missing header, tampered signature, token used after logout |
+| `403 Forbidden` | *I know who you are, but you may not do this* | valid token whose `role` != `admin` on `/protected/admin` |
+
+### Rate limiting (429)
+
+`/auth/login` is limited to **5 requests per minute per IP** (fixed window). Exceeding
+it returns `429` with `{ "error": "Too many login attempts. Please try again later." }`.
+This blunts password-brute-forcing while leaving the other routes untouched.
+
+---
 
 ## Project structure
 
 ```
 flyrank-be03-auth-login-protect/
-├── .env.example                # template for environment variables
-├── .gitignore                  # excludes .env, *.db, bin/obj
-├── .config/dotnet-tools.json   # pins the dotnet-ef local tool
-├── FlyRank.Auth.sln
-├── docs/
-│   └── swagger-ui.png
-├── scripts/
-│   └── smoke-test.ps1
-└── src/FlyRank.Auth.Api/
-    ├── Controllers/             # Auth, Protected, Public
-    ├── Data/                    # ApplicationDbContext
-    ├── Dtos/                    # request/response contracts
-    ├── Middleware/              # RevokedTokenMiddleware
-    ├── Migrations/              # EF Core migrations
-    ├── Models/                  # AppUser, RefreshToken, RevokedAccessToken
-    ├── Options/                 # JwtOptions
-    ├── Services/                # JwtTokenService
-    └── Program.cs
+├─ FlyRank.Auth.sln
+├─ README.md
+├─ .env.example
+├─ docs/
+│  └─ swagger-ui.png
+├─ scripts/
+│  └─ smoke-test.ps1            # 14 end-to-end assertions
+├─ src/FlyRank.Auth.Api/
+│  ├─ Program.cs                # wiring: JWT, errors, rate limit, admin policy
+│  ├─ Dtos/AuthDtos.cs
+│  ├─ Models/AppUser.cs
+│  ├─ Services/JwtTokenService.cs
+│  ├─ Middleware/RevokedTokenMiddleware.cs
+│  ├─ Controllers/{Public,Auth,Protected}Controller.cs
+│  └─ Migrations/
+└─ ai-version/                  # Stage 7 bonus artifact (NOT the submission)
+   ├─ server.js                 # AI first draft (has defects)
+   ├─ rematch/server.js         # regenerated after the improved prompt
+   ├─ PROMPT.md                 # original + improved prompt
+   └─ DIFF.txt                  # git diff --no-index of the two drafts
 ```
 
-## AI vs Me
+---
 
-**What I asked the AI to do:** scaffold an ASP.NET Core Web API with Identity + JWT,
-wire up Swagger with Bearer support, implement the five required routes with exact
-status codes, and add a reusable token-checking middleware.
+## AI vs Me (Stage 7)
 
-**What the AI produced:** the project skeleton, the controller/service/DTO code, the
-Swagger configuration, and a first draft of this README.
+### The prompt
 
-**What I reviewed and corrected:**
+> Build a secured authentication API in **Node.js with Express**. Exactly five routes:
+> `POST /auth/signup` (`{email,password}` → `201`, `400` if a field is missing),
+> `POST /auth/login` (→ `200` + JWT, `401` if wrong), `POST /auth/logout` (protected →
+> `204`), `GET /protected/profile` (protected → id+email, `401` if token missing/invalid),
+> `GET /public/info` (open → `{ "message": "Welcome stranger! This info is public." }`).
+> Read the token from the `Authorization` header, verify it, and put the check in a
+> reusable middleware. Same status codes. Keep it short.
 
-1. **Package targeting.** The first dependency install pulled `10.x` packages that
-   require `net10.0`; the installed SDK is `9.0`. I pinned every Microsoft package to
-   the `9.0.13` line.
-2. **Swashbuckle version.** `10.x` depends on `Microsoft.OpenApi` `2.x`, whose API
-   surface differs from the widely-documented `1.6` API. I pinned `Swashbuckle 6.9.0`
-   for a stable, well-understood configuration.
-3. **Missing migration in the running build.** The first server start logged
-   *"No migrations were found"* because the DLL was built before the migration was
-   generated. I rebuilt, reset the SQLite file, and confirmed the schema was applied.
-4. **Swagger route.** The template had no docs UI at all; I added Swashbuckle and
-   moved the UI to the required `/docs` prefix.
-5. **Logout semantics.** A naive logout just deletes a client-side token. I made
-   logout meaningful by deny-listing the `jti` and revoking the refresh token.
-```
+### What the AI produced
+
+`ai-version/server.js` — a runnable Express + `jsonwebtoken` app. It returned the right
+status codes on the happy path, so at a glance it "worked".
+
+### I ran it and fired my own checkpoints
+
+| Check | AI draft | Should be |
+|---|---|---|
+| `POST /auth/signup` | `201` | `201` ✅ |
+| `POST /auth/login` | `200` + token | `200` ✅ |
+| `GET /protected/profile` (valid token) | `200` | `200` ✅ |
+| `GET /protected/profile` (**tampered** token) | **`200`** ❌ | `401` |
+| `GET /protected/profile` (**no `Bearer` prefix**) | **`200`** ❌ | `401` |
+| `GET /protected/profile` (garbage token) | `401` | `401` ✅ |
+
+The two failures are the whole point: a token whose signature I never signed, and a
+bare token with no scheme, both sailed through.
+
+### Three written questions
+
+1. **Where did I have to correct the AI's security logic?**
+   The AI *decoded* the token (`jwt.decode`) instead of *verifying* it (`jwt.verify`).
+   Decoding only parses the Base64 payload — it never checks the signature — so any
+   forged token with a valid-looking body was accepted. My checkpoints proved it
+   (tampered token → `200`). I switched the draft to `jwt.verify` inside a `try/catch`
+   that returns `401` on any failure.
+2. **Did the AI need extra guidance for the header/scheme and the 403 route?**
+   Yes. It stripped `Bearer ` with `.replace("Bearer ", "")`, which silently leaves a
+   bare token untouched — so `Authorization: <token>` was accepted. The improved prompt
+   had to say *"require the literal `Bearer ` prefix and reject a bare token"* and
+   *"add `GET /protected/admin` returning `403` for non-admins"* explicitly, because
+   the first prompt never mentioned either.
+3. **What did the AI get right immediately that I kept?**
+   The overall skeleton — the five routes, the `{ email, password }` contract, the
+   `201`/`400`/`401` status codes, the exact public message, and the idea of a single
+   reusable `auth` middleware. That structure is what I kept; only the security and the
+   error shape needed fixing.
+
+### Concrete differences (my .NET build vs the AI draft)
+
+1. **Verification:** AI used `jwt.decode` (no signature check) → I use full JWT
+   validation; tampered tokens get `401`.
+2. **Scheme handling:** AI stripped `Bearer ` with `replace` (accepted bare tokens) →
+   I require the exact `Bearer ` prefix.
+3. **Password storage:** AI used **MD5** → I use ASP.NET Core Identity **PBKDF2**.
+4. **Error shape:** AI sent plain-text bodies → I return `{ "error": "..." }` everywhere.
+5. **Token hygiene:** AI `console.log`-ed the token on every request → I never log it.
+6. **Logout:** AI's `logout` was a no-op → mine revokes the `jti` and the refresh token,
+   so the token stops working.
+7. **Extras the AI had none of:** the `403` admin gate, the login **rate limit**, and
+   SQLite persistence.
+
+### Rematch
+
+Using the improved prompt (added: verify with `jwt.verify`, strict `Bearer ` parsing,
+`bcrypt`/scrypt hashing, no token logging, `{ error }` bodies, and the admin `403` route),
+I regenerated the draft as `ai-version/rematch/server.js`. The diff between the two
+drafts is captured literally in [`ai-version/DIFF.txt`](ai-version/DIFF.txt).
+
+**One-sentence change:** forcing signature verification plus strict `Bearer ` parsing
+turned an API that accepted forged tokens into one that rejects them — the same fix that
+a single decode-vs-verify decision forced on the original.
