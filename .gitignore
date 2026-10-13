@@ -1,0 +1,27 @@
+# ---- .NET build artifacts ----
+bin/
+obj/
+*.user
+*.suo
+
+# ---- Secrets / environment ----
+# Never commit the real .env. Commit .env.example instead.
+.env
+.env.*
+!.env.example
+
+# ---- Local database (SQLite) ----
+*.db
+*.db-shm
+*.db-wal
+
+# ---- IDE / OS ----
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- Local run artifacts ----
+*.log
+server.pid
